@@ -7,8 +7,9 @@ public class Markov : MonoBehaviour
 {
     [SerializeField] private List<GameObject> objects = new List<GameObject>();
     private List<GameObject> spawnedObjects = new List<GameObject>();
-
     private List<int> spawnedTileIds = new List<int>();
+
+    [SerializeField] private int nGram = 2;
 
     private void Update()
     {
@@ -39,7 +40,7 @@ public class Markov : MonoBehaviour
 
         if (Input.GetKeyDown(KeyCode.G))
         {
-            GenerateLevelMarkov(2); // prueba con bi-gramas
+            GenerateLevelMarkov(nGram); // prueba con bi-gramas
         }
     }
 
@@ -128,13 +129,14 @@ public class Markov : MonoBehaviour
 
         int r = Random.Range(0, total);
         int acc = 0;
+
         foreach (var kv in freq)
         {
             acc += kv.Value;
             if (r < acc) return kv.Key;
         }
-        // Fallback defensivo
-        return freq.Keys.First();
+
+        return -1;
     }
 
     // Usa el modelo para elegir y spawnear el siguiente tile con backoff
