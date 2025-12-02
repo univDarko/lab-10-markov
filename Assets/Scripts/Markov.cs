@@ -1,5 +1,7 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using UnityEngine;
 
@@ -7,87 +9,246 @@ public class Markov : MonoBehaviour
 {
     [SerializeField] private List<GameObject> objects = new List<GameObject>();
     private List<GameObject> spawnedObjects = new List<GameObject>();
-    private List<int> spawnedTileIds = new List<int>();
 
+    // Lista de tiles que han aparecido (0-based): incluye importados y generados
+    private List<int> appearedTileIds = new List<int>();
+
+    // Secuencias importadas desde texto (0-based). Este es el dataset para entrenar el modelo.
+    private List<List<int>> trainingSequences = new List<List<int>>();
+
+    [Header("Importación de secuencias")]
+    [Tooltip("Texto con secuencias (0-based): números separados por coma (indices de 'objects'). '.' o salto de línea terminan una secuencia. Ej: 0,1,2.\n3,4,5")]
+    [SerializeField] private TextAsset sequenceText;
+
+    [Tooltip("Si true, carga desde StreamingAssets usando el nombre de archivo de abajo.")]
+    [SerializeField] private bool loadFromStreamingAssets = false;
+
+    [Tooltip("Nombre del archivo dentro de StreamingAssets (por ejemplo: tiles.txt)")]
+    [SerializeField] private string streamingAssetsFileName = "tiles.txt";
+
+    [Tooltip("Vaciar escena y datos antes de importar.")]
+    [SerializeField] private bool clearBeforeImport = true;
+
+    [Header("Modelo")]
     [SerializeField] private int nGram = 2;
 
     private void Update()
     {
-        if (Input.GetKeyDown(KeyCode.Alpha1))
+        if (Input.GetKeyDown(KeyCode.L))
         {
-            AddTile(1);
-        }
-
-        if (Input.GetKeyDown(KeyCode.Alpha2))
-        {
-            AddTile(2);
-        }
-
-        if (Input.GetKeyDown(KeyCode.Alpha3))
-        {
-            AddTile(3);
-        }
-
-        if (Input.GetKeyDown(KeyCode.Alpha4))
-        {
-            AddTile(4);
-        }
-
-        if (Input.GetKeyDown(KeyCode.Alpha5))
-        {
-            AddTile(5);
+            ImportSequences();
         }
 
         if (Input.GetKeyDown(KeyCode.G))
         {
-            GenerateLevelMarkov(nGram); // prueba con bi-gramas
+            GenerateLevelMarkov(nGram); // generar 1 más
+        }
+
+        if (Input.GetKeyDown(KeyCode.H))
+        {
+            GenerateMore(10); // generar 10 más
         }
     }
 
-    private void AddTile(int num)
+    private void AddTile(int index0)
     {
-        int prefabIndex = num - 1;
-        var inst = Instantiate(objects[prefabIndex]);
-        spawnedObjects.Add(inst);
-        spawnedTileIds.Add(prefabIndex);
+        // Validación del rango (0..objects.Count-1)
+        if (index0 < 0 || index0 >= objects.Count)
+        {
+            Debug.LogWarning($"Índice de tile {index0} fuera de rango. Debe estar entre 0 y {objects.Count - 1}.");
+            return;
+        }
 
-        inst.gameObject.transform.position = new Vector3(spawnedObjects.Count + 1.2f, 0, 0);
+        var inst = Instantiate(objects[index0]);
+        spawnedObjects.Add(inst);
+
+        // Registrar que este tile apareció
+        appearedTileIds.Add(index0);
+
+        inst.gameObject.transform.position = new Vector3(spawnedObjects.Count * 1.28f, 0, 0);
 
         if (spawnedObjects.Count > 10)
         {
-            Camera.main.transform.position += new Vector3(1f, 0, 0);
+            Camera.main.transform.position += new Vector3(1.28f, 0, 0);
         }
     }
 
+    private void ClearSpawned()
+    {
+        foreach (var go in spawnedObjects)
+        {
+            if (go != null) Destroy(go);
+        }
+        spawnedObjects.Clear();
+
+        // Limpiar la traza de aparición
+        appearedTileIds.Clear();
+    }
+
+    private List<List<int>> ParseSequences(string content)
+    {
+        // Formato: números (0-based) separados por coma.
+        // '.' o salto de línea ('\n') finalizan una secuencia.
+        // Ejemplos válidos:
+        // "0,1,2.\n3,4,5" -> [[0,1,2],[3,4,5]]
+        // "7,8,9.\r\n10,11" -> [[7,8,9],[10,11]]
+        var sequences = new List<List<int>>();
+        if (string.IsNullOrWhiteSpace(content)) return sequences;
+
+        // Normalizar finales de línea a '\n'
+        content = content.Replace("\r", string.Empty);
+
+        // Dividir por delimitadores de fin de secuencia: '.' y '\n'
+        var rawSequences = content.Split(new[] { '.', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var rawSeq in rawSequences)
+        {
+            var seq = new List<int>();
+            var tokens = rawSeq.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var token in tokens)
+            {
+                var t = token.Trim();
+                if (t.Length == 0) continue;
+                if (int.TryParse(t, out int num))
+                {
+                    seq.Add(num); // ya 0-based
+                }
+                else
+                {
+                    Debug.LogWarning($"Token no válido en secuencia: \"{t}\"");
+                }
+            }
+
+            if (seq.Count > 0)
+                sequences.Add(seq);
+        }
+
+        return sequences;
+    }
+
+    private void ImportSequences()
+    {
+        try
+        {
+            string content = null;
+
+            if (loadFromStreamingAssets)
+            {
+                var path = Path.Combine(Application.streamingAssetsPath, streamingAssetsFileName);
+                if (!File.Exists(path))
+                {
+                    Debug.LogError($"Archivo no encontrado en StreamingAssets: {path}");
+                    return;
+                }
+                content = File.ReadAllText(path);
+            }
+            else
+            {
+                if (sequenceText == null)
+                {
+                    Debug.LogError("No se asignó un TextAsset en 'sequenceText'.");
+                    return;
+                }
+                content = sequenceText.text;
+            }
+
+            var sequences0Based = ParseSequences(content);
+            if (sequences0Based.Count == 0)
+            {
+                Debug.LogWarning("No se encontraron secuencias válidas en el documento.");
+                return;
+            }
+
+            ImportSequencesAndSpawn(sequences0Based, clearBeforeImport);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"Error al importar secuencias: {ex.Message}");
+        }
+    }
+
+    // sequences0Based: secuencias leídas (0-based). clear controla si se limpia escena y dataset.
+    private void ImportSequencesAndSpawn(List<List<int>> sequences0Based, bool clear)
+    {
+        if (clear)
+        {
+            ClearSpawned();            // limpia escena + appearedTileIds
+            trainingSequences.Clear(); // limpia dataset
+        }
+
+        // Guardar en dataset (0-based y dentro de rango)
+        foreach (var seq in sequences0Based)
+        {
+            var filtered = seq
+                .Where(x => x >= 0 && x < objects.Count) // filtrar fuera de rango
+                .ToList();
+
+            if (filtered.Count > 0)
+                trainingSequences.Add(filtered);
+        }
+
+        // Representar en escena (opcional: aquí lo hacemos por defecto)
+        foreach (var seq in sequences0Based)
+        {
+            foreach (var index0 in seq)
+            {
+                AddTile(index0); // AddTile espera 0-based
+            }
+        }
+
+        int totalTilesDataset = trainingSequences.Sum(s => s.Count);
+        Debug.Log($"Importadas {trainingSequences.Count} secuencia(s) al dataset (total tiles dataset: {totalTilesDataset}). " +
+                  $"Mostrados {appearedTileIds.Count} tiles en escena.");
+    }
+
+    // Construye el modelo n-gram SOLO desde el dataset importado (trainingSequences)
     private Dictionary<string, Dictionary<int, int>> BuildNGramModel(int n)
     {
         var model = new Dictionary<string, Dictionary<int, int>>();
+        if (n <= 0) return model;
 
-        // Necesitamos al menos n+1 elementos para formar (contexto -> siguiente)
-        if (spawnedTileIds.Count < n + 1)
-            return model;
-
-        for (int i = 0; i <= spawnedTileIds.Count - n - 1; i++)
+        foreach (var seq in trainingSequences)
         {
-            // contexto de longitud n
-            var contextSlice = spawnedTileIds.Skip(i).Take(n);
-            string contextKey = string.Join(",", contextSlice);
+            if (seq == null || seq.Count < n + 1) continue;
 
-            int nextId = spawnedTileIds[i + n];
-
-            if (!model.TryGetValue(contextKey, out var freqDict))
+            for (int i = 0; i <= seq.Count - n - 1; i++)
             {
-                freqDict = new Dictionary<int, int>();
-                model[contextKey] = freqDict;
+                var contextSlice = seq.Skip(i).Take(n);
+                string contextKey = string.Join(",", contextSlice);
+
+                int nextId = seq[i + n];
+
+                if (!model.TryGetValue(contextKey, out var freqDict))
+                {
+                    freqDict = new Dictionary<int, int>();
+                    model[contextKey] = freqDict;
+                }
+
+                if (!freqDict.ContainsKey(nextId))
+                    freqDict[nextId] = 0;
+
+                freqDict[nextId]++;
             }
-
-            if (!freqDict.ContainsKey(nextId))
-                freqDict[nextId] = 0;
-
-            freqDict[nextId]++;
         }
 
         return model;
+    }
+
+    // Frecuencia global (unigram) SOLO del dataset; sirve como fallback cuando no hay contexto
+    private Dictionary<int, int> BuildUnigramFrequencies()
+    {
+        var freq = new Dictionary<int, int>();
+        foreach (var seq in trainingSequences)
+        {
+            if (seq == null) continue;
+            foreach (var id in seq)
+            {
+                if (id < 0 || id >= objects.Count) continue;
+                if (!freq.ContainsKey(id)) freq[id] = 0;
+                freq[id]++;
+            }
+        }
+        return freq;
     }
 
     private void GenerateLevelMarkov(int ngram)
@@ -98,36 +259,42 @@ public class Markov : MonoBehaviour
             return;
         }
 
-        // Construimos el modelo
+        // Construimos el modelo desde el dataset importado
         var model = BuildNGramModel(ngram);
+        var unigram = BuildUnigramFrequencies();
 
-        if (model.Count == 0)
+        if (model.Count == 0 && unigram.Count == 0)
         {
-            Debug.LogWarning("No hay suficientes tiles para crear el modelo.");
+            Debug.LogWarning("No hay datos importados para crear el modelo.");
             return;
         }
 
-        // Contexto actual: los últimos ngram índices
-        if (spawnedTileIds.Count < ngram)
+        // Contexto actual: los últimos ngram índices de los tiles que han aparecido
+        // Si no hay suficiente contexto, aún podemos generar usando el unigram del dataset.
+        string currentContext = appearedTileIds.Count >= ngram
+            ? string.Join(",", appearedTileIds.Skip(appearedTileIds.Count - ngram).Take(ngram))
+            : "(contexto insuficiente)";
+
+        Debug.Log($"Contexto actual N={ngram}: {currentContext} (model={model.Count} ctx, unigram={unigram.Count} ids)");
+
+        SelectNextTileAndSpawn(ngram, model, unigram);
+    }
+
+    private void GenerateMore(int count)
+    {
+        for (int i = 0; i < count; i++)
         {
-            Debug.LogWarning("Secuencia insuficiente para usar este N-Gram.");
-            return;
+            GenerateLevelMarkov(nGram);
         }
-
-        string currentContext = string.Join(",", spawnedTileIds.Skip(spawnedTileIds.Count - ngram).Take(ngram));
-
-        // En Parte 2: usar este contexto y el modelo para elegir y crear el siguiente tile.
-        Debug.Log($"Contexto actual N={ngram}: {currentContext} (modelo listo con {model.Count} contextos)");
-
-        SelectNextTileAndSpawn(ngram, model);
     }
 
     private int WeightedPick(Dictionary<int, int> freq)
     {
         int total = 0;
         foreach (var v in freq.Values) total += v;
+        if (total <= 0) return -1;
 
-        int r = Random.Range(0, total);
+        int r = UnityEngine.Random.Range(0, total);
         int acc = 0;
 
         foreach (var kv in freq)
@@ -139,23 +306,37 @@ public class Markov : MonoBehaviour
         return -1;
     }
 
-    // Usa el modelo para elegir y spawnear el siguiente tile con backoff
-    private void SelectNextTileAndSpawn(int n, Dictionary<string, Dictionary<int, int>> model)
+    // Usa el modelo para elegir y spawnear el siguiente tile con backoff; si falla, usa unigram del dataset
+    private void SelectNextTileAndSpawn(int n, Dictionary<string, Dictionary<int, int>> model, Dictionary<int, int> unigram)
     {
         // Intento con contexto de longitud n, luego backoff hasta 1
         for (int k = n; k >= 1; k--)
         {
-            string ctx = string.Join(",", spawnedTileIds.Skip(spawnedTileIds.Count - k).Take(k));
+            if (appearedTileIds.Count < k) continue;
+
+            string ctx = string.Join(",", appearedTileIds.Skip(appearedTileIds.Count - k).Take(k));
             if (model.TryGetValue(ctx, out var freq) && freq.Count > 0)
             {
-                int nextId = WeightedPick(freq);
-                AddTile(nextId + 1);
+                int nextId = WeightedPick(freq); // 0-based
+                if (nextId >= 0) AddTile(nextId);  // AddTile espera 0-based
                 return;
             }
         }
 
-        // Si no hay contexto conocido, elige aleatorio
-        int rndIdx = Random.Range(0, objects.Count);
-        AddTile(rndIdx + 1);
+        // Fallback: elegir según unigram del dataset (NO aleatorio sobre objects)
+        if (unigram != null && unigram.Count > 0)
+        {
+            int nextId = WeightedPick(unigram);
+            if (nextId >= 0) { AddTile(nextId); return; }
+        }
+
+        Debug.LogWarning("No se pudo generar: sin contexto en el modelo y sin unigram disponible.");
+    }
+
+    [ContextMenu("Importar desde TextAsset")]
+    private void ContextMenu_ImportFromTextAsset()
+    {
+        loadFromStreamingAssets = false;
+        ImportSequences();
     }
 }
