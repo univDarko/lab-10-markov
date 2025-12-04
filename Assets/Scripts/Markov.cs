@@ -16,21 +16,23 @@ public class Markov : MonoBehaviour
     // Secuencias importadas desde texto (0-based). Este es el dataset para entrenar el modelo.
     private List<List<int>> trainingSequences = new List<List<int>>();
 
+    // GETTERS de solo lectura para otros componentes (no se aprende de estas listas)
+    public IReadOnlyList<int> AppearedTileIds => appearedTileIds;
+    public int ObjectCount => objects != null ? objects.Count : 0;
+
     [Header("Importación de secuencias")]
-    [Tooltip("Texto con secuencias (0-based): números separados por coma (indices de 'objects'). '.' o salto de línea terminan una secuencia. Ej: 0,1,2.\n3,4,5")]
     [SerializeField] private TextAsset sequenceText;
-
-    [Tooltip("Si true, carga desde StreamingAssets usando el nombre de archivo de abajo.")]
     [SerializeField] private bool loadFromStreamingAssets = false;
-
-    [Tooltip("Nombre del archivo dentro de StreamingAssets (por ejemplo: tiles.txt)")]
     [SerializeField] private string streamingAssetsFileName = "tiles.txt";
-
-    [Tooltip("Vaciar escena y datos antes de importar.")]
     [SerializeField] private bool clearBeforeImport = true;
 
     [Header("Modelo")]
     [SerializeField] private int nGram = 2;
+
+    // Referencia opcional para capturas automáticas
+    [Header("Capturas")]
+    [Tooltip("Componente que realizará las capturas PNG/TXT por nivel.")]
+    [SerializeField] private ScreenshotCapturer screenshotCapturer;
 
     private void Update()
     {
@@ -41,18 +43,66 @@ public class Markov : MonoBehaviour
 
         if (Input.GetKeyDown(KeyCode.G))
         {
+            ClearSpawned();
             GenerateLevelMarkov(nGram); // generar 1 más
         }
 
         if (Input.GetKeyDown(KeyCode.H))
         {
-            GenerateMore(10); // generar 10 más
+            ClearSpawned();
+            GenerateMore(8);
+        }
+
+        // Lanzar lote de N niveles y capturar cada uno (ejemplo con tecla J)
+        if (Input.GetKeyDown(KeyCode.J))
+        {
+            // Ajusta el número deseado de niveles
+            int levelsToRun = 600;
+            StartCoroutine(RunBatchGenerateAndCapture(levelsToRun, 8));
+        }
+    }
+
+    public IEnumerator RunBatchGenerateAndCapture(int levelsCount, int tilesPerLevel)
+    {
+        if (levelsCount <= 0) yield break;
+
+        // Validar que hay datos de entrenamiento
+        var modelCheck = BuildNGramModel(nGram);
+        var unigramCheck = BuildUnigramFrequencies();
+        if (modelCheck.Count == 0 && unigramCheck.Count == 0)
+        {
+            Debug.LogWarning("No hay datos importados para crear el modelo. Importa secuencias antes de ejecutar el lote.");
+            yield break;
+        }
+
+        for (int i = 0; i < levelsCount; i++)
+        {
+            // 1) Limpiar escena/estado previo del nivel
+            ClearSpawned();
+
+            // 2) Generar el nivel (cantidad fija de tiles)
+            GenerateMore(tilesPerLevel);
+
+            // 3) Esperar al final del frame para asegurar render
+            yield return new WaitForEndOfFrame();
+
+            // 4) Capturar PNG + TXT con timestamp por nivel (si hay capturador)
+            if (screenshotCapturer != null)
+            {
+                yield return screenshotCapturer.CaptureNow(i);
+            }
+            else
+            {
+                Debug.LogWarning("ScreenshotCapturer no asignado. Se omiten capturas.");
+            }
+
+            // 5) Pequeña espera opcional para I/O (ajústalo si necesitas throttling)
+            yield return null;
         }
     }
 
     private void AddTile(int index0)
     {
-        // Validación del rango (0..objects.Count-1)
         if (index0 < 0 || index0 >= objects.Count)
         {
             Debug.LogWarning($"Índice de tile {index0} fuera de rango. Debe estar entre 0 y {objects.Count - 1}.");
@@ -62,15 +112,9 @@ public class Markov : MonoBehaviour
         var inst = Instantiate(objects[index0]);
         spawnedObjects.Add(inst);
 
-        // Registrar que este tile apareció
         appearedTileIds.Add(index0);
 
-        inst.gameObject.transform.position = new Vector3(spawnedObjects.Count * 1.28f, 0, 0);
-
-        if (spawnedObjects.Count > 10)
-        {
-            Camera.main.transform.position += new Vector3(1.28f, 0, 0);
-        }
+        inst.gameObject.transform.position = new Vector3(transform.position.x + (spawnedObjects.Count * 1.28f) - 1.28f, transform.position.y, 0);
     }
 
     private void ClearSpawned()
@@ -185,15 +229,6 @@ public class Markov : MonoBehaviour
 
             if (filtered.Count > 0)
                 trainingSequences.Add(filtered);
-        }
-
-        // Representar en escena (opcional: aquí lo hacemos por defecto)
-        foreach (var seq in sequences0Based)
-        {
-            foreach (var index0 in seq)
-            {
-                AddTile(index0); // AddTile espera 0-based
-            }
         }
 
         int totalTilesDataset = trainingSequences.Sum(s => s.Count);
@@ -312,9 +347,9 @@ public class Markov : MonoBehaviour
         // Intento con contexto de longitud n, luego backoff hasta 1
         for (int k = n; k >= 1; k--)
         {
-            if (appearedTileIds.Count < k) continue;
+            if (AppearedTileIds.Count < k) continue;
 
-            string ctx = string.Join(",", appearedTileIds.Skip(appearedTileIds.Count - k).Take(k));
+            string ctx = string.Join(",", AppearedTileIds.Skip(AppearedTileIds.Count - k).Take(k));
             if (model.TryGetValue(ctx, out var freq) && freq.Count > 0)
             {
                 int nextId = WeightedPick(freq); // 0-based
